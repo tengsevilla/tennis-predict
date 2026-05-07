@@ -15,9 +15,9 @@ label_encoders = {}
 latest_player_stats = {}
 categorical_cols = ['surface']
 numerical_cols = [
-    'player_a_rank', 'player_a_age', 'player_a_days_since_last_match',
+    'player_a_rank', 'player_a_age',
     'player_a_recent_win_pct', 'player_a_serve_win_pct', 'player_a_return_win_pct', 'player_a_sets_dropped_avg',
-    'player_b_rank', 'player_b_age', 'player_b_days_since_last_match',
+    'player_b_rank', 'player_b_age',
     'player_b_recent_win_pct', 'player_b_serve_win_pct', 'player_b_return_win_pct', 'player_b_sets_dropped_avg'
 ]
 features = numerical_cols + categorical_cols
@@ -51,37 +51,17 @@ def load_and_engineer_data(filepath="cleaned_atp_data.csv"):
     df['tourney_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d')
     df = df.sort_values('tourney_date').reset_index(drop=True)
 
-    # Calculate days_since_last_match
-    last_match_dates = {}
-    winner_days = []
-    loser_days = []
-
     # Also calculate sets won for rolling stats
     w_sets_dropped = []
     l_sets_dropped = []
 
     for idx, row in df.iterrows():
-        w_id = row['winner_id']
-        l_id = row['loser_id']
-        date = row['tourney_date']
-
-        # Days since last match cap at 30
-        w_days = (date - last_match_dates[w_id]).days if w_id in last_match_dates else 30
-        l_days = (date - last_match_dates[l_id]).days if l_id in last_match_dates else 30
-        winner_days.append(min(w_days, 30))
-        loser_days.append(min(l_days, 30))
-
-        last_match_dates[w_id] = date
-        last_match_dates[l_id] = date
-
         w_sets, l_sets = count_sets_won(row['score'])
         # sets dropped by winner = sets won by loser
         w_sets_dropped.append(l_sets)
         # sets dropped by loser = sets won by winner
         l_sets_dropped.append(w_sets)
 
-    df['winner_days_since_last_match'] = winner_days
-    df['loser_days_since_last_match'] = loser_days
     df['winner_sets_dropped'] = w_sets_dropped
     df['loser_sets_dropped'] = l_sets_dropped
 
@@ -165,7 +145,6 @@ def load_and_engineer_data(filepath="cleaned_atp_data.csv"):
         age = df.loc[last_row.name, 'winner_age'] if last_row['won_match'] == 1 else df.loc[last_row.name, 'loser_age']
         latest_player_stats[name] = {
             'rank': rank, 'age': age,
-            'days_since_last_match': 30, # We just default to 30 for future inferences assuming typical tournament breaks
             'recent_win_pct': last_row['final_recent_win_pct'],
             'serve_win_pct': last_row['final_serve_win_pct'],
             'return_win_pct': last_row['final_return_win_pct'],
@@ -191,7 +170,6 @@ def balance_dataset(df):
         w_name = row['winner_name']
         w_rank = row['winner_rank']
         w_age = row['winner_age']
-        w_days = row['winner_days_since_last_match']
         w_recent_win_pct = row['winner_recent_win_pct']
         w_serve_win_pct = row['winner_serve_win_pct']
         w_return_win_pct = row['winner_return_win_pct']
@@ -201,7 +179,6 @@ def balance_dataset(df):
         l_name = row['loser_name']
         l_rank = row['loser_rank']
         l_age = row['loser_age']
-        l_days = row['loser_days_since_last_match']
         l_recent_win_pct = row['loser_recent_win_pct']
         l_serve_win_pct = row['loser_serve_win_pct']
         l_return_win_pct = row['loser_return_win_pct']
@@ -215,7 +192,6 @@ def balance_dataset(df):
             'surface': surface,
             'player_a_rank': w_rank,
             'player_a_age': w_age,
-            'player_a_days_since_last_match': w_days,
             'player_a_recent_win_pct': w_recent_win_pct,
             'player_a_serve_win_pct': w_serve_win_pct,
             'player_a_return_win_pct': w_return_win_pct,
@@ -223,7 +199,6 @@ def balance_dataset(df):
 
             'player_b_rank': l_rank,
             'player_b_age': l_age,
-            'player_b_days_since_last_match': l_days,
             'player_b_recent_win_pct': l_recent_win_pct,
             'player_b_serve_win_pct': l_serve_win_pct,
             'player_b_return_win_pct': l_return_win_pct,
@@ -239,7 +214,6 @@ def balance_dataset(df):
             'surface': surface,
             'player_a_rank': l_rank,
             'player_a_age': l_age,
-            'player_a_days_since_last_match': l_days,
             'player_a_recent_win_pct': l_recent_win_pct,
             'player_a_serve_win_pct': l_serve_win_pct,
             'player_a_return_win_pct': l_return_win_pct,
@@ -247,7 +221,6 @@ def balance_dataset(df):
 
             'player_b_rank': w_rank,
             'player_b_age': w_age,
-            'player_b_days_since_last_match': w_days,
             'player_b_recent_win_pct': w_recent_win_pct,
             'player_b_serve_win_pct': w_serve_win_pct,
             'player_b_return_win_pct': w_return_win_pct,
@@ -257,12 +230,12 @@ def balance_dataset(df):
 
         # Keep track of latest stats for inference
         latest_player_stats[w_name] = {
-            'rank': w_rank, 'age': w_age, 'days_since_last_match': w_days,
+            'rank': w_rank, 'age': w_age,
             'recent_win_pct': w_recent_win_pct, 'serve_win_pct': w_serve_win_pct,
             'return_win_pct': w_return_win_pct, 'sets_dropped_avg': w_sets_dropped_avg
         }
         latest_player_stats[l_name] = {
-            'rank': l_rank, 'age': l_age, 'days_since_last_match': l_days,
+            'rank': l_rank, 'age': l_age,
             'recent_win_pct': l_recent_win_pct, 'serve_win_pct': l_serve_win_pct,
             'return_win_pct': l_return_win_pct, 'sets_dropped_avg': l_sets_dropped_avg
         }
@@ -367,7 +340,6 @@ def predict_match(player_a_name, player_b_name, surface):
     row_dict = {
         'player_a_rank': a_stats['rank'],
         'player_a_age': a_stats['age'],
-        'player_a_days_since_last_match': a_stats['days_since_last_match'],
         'player_a_recent_win_pct': a_stats['recent_win_pct'],
         'player_a_serve_win_pct': a_stats['serve_win_pct'],
         'player_a_return_win_pct': a_stats['return_win_pct'],
@@ -375,7 +347,6 @@ def predict_match(player_a_name, player_b_name, surface):
 
         'player_b_rank': b_stats['rank'],
         'player_b_age': b_stats['age'],
-        'player_b_days_since_last_match': b_stats['days_since_last_match'],
         'player_b_recent_win_pct': b_stats['recent_win_pct'],
         'player_b_serve_win_pct': b_stats['serve_win_pct'],
         'player_b_return_win_pct': b_stats['return_win_pct'],
