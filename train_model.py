@@ -3,8 +3,9 @@ import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
+import joblib
 
 # Global variables to hold model, scaler, encoders, and latest player stats for inference
 model = None
@@ -154,8 +155,10 @@ def preprocess_and_train():
     print(f"Overall Accuracy: {accuracy_score(y_test, y_pred):.4f}")
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred))
+    print("\nConfusion Matrix:")
+    print(confusion_matrix(y_test, y_pred))
 
-    print("Generating feature importance plot...")
+    print("\nGenerating feature importance plot...")
     importances = model.feature_importances_
     indices = np.argsort(importances)[::-1]
 
@@ -167,6 +170,12 @@ def preprocess_and_train():
     plt.tight_layout()
     plt.savefig("feature_importances.png")
     print("Saved feature_importances.png")
+
+    print("Saving model and preprocessors using joblib...")
+    joblib.dump(model, "tennis_model.joblib")
+    joblib.dump(scaler, "scaler.joblib")
+    joblib.dump(label_encoders, "label_encoders.joblib")
+    print("Saved tennis_model.joblib, scaler.joblib, and label_encoders.joblib")
 
 def predict_match(player_a_name, player_b_name, surface):
     global model, scaler, label_encoders, latest_player_stats
