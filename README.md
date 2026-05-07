@@ -11,7 +11,7 @@ This repository contains tools to fetch, clean, and use historical ATP tennis da
 
 Install dependencies:
 ```bash
-pip install pandas scikit-learn matplotlib
+pip install pandas scikit-learn matplotlib xgboost
 ```
 
 ## Usage

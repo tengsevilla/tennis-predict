@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 import matplotlib.pyplot as plt
@@ -141,14 +141,26 @@ def preprocess_and_train():
     print("Training model using TimeSeriesSplit...")
     tscv = TimeSeriesSplit(n_splits=5)
 
-    model = RandomForestClassifier(n_estimators=500, max_depth=10, random_state=42)
+    model = XGBClassifier(
+        n_estimators=1000,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        early_stopping_rounds=50,
+        random_state=42,
+        eval_metric='logloss'
+    )
 
     # We evaluate on the last split to give an overall accuracy score
     for train_index, test_index in tscv.split(X):
         X_train, X_test = X.iloc[train_index], X.iloc[test_index]
         y_train, y_test = y.iloc[train_index], y.iloc[test_index]
 
-        model.fit(X_train, y_train)
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_test, y_test)],
+            verbose=False
+        )
 
     y_pred = model.predict(X_test)
     print("\n--- Evaluation on Last Time Split ---")
