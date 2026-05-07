@@ -127,3 +127,30 @@ Prediction for Novak Djokovic vs Rafael Nadal on Clay:
 Novak Djokovic Win Probability: 84.71%
 Rafael Nadal Win Probability: 15.29%
 ```
+
+## Run at: Thu May  7 14:56:25 UTC 2026
+### Model: XGBoost (v4 - Advanced Historical Context)
+```
+Loading and engineering data...
+Balancing dataset...
+Preprocessing data...
+Training model using TimeSeriesSplit...
+
+--- Evaluation on Last Time Split ---
+Overall Accuracy: 0.6528
+
+Confusion Matrix:
+[[3079 1643]
+ [1636 3085]]
+
+Generating feature importance plot...
+Saved feature_importances.png
+Saving model and preprocessors using joblib...
+Saved tennis_model.joblib, scaler.joblib, and label_encoders.joblib
+
+Testing Inference:
+
+Prediction for Novak Djokovic vs Rafael Nadal on Clay:
+Novak Djokovic Win Probability: 81.52%
+Rafael Nadal Win Probability: 18.48%
+```
