@@ -3,10 +3,20 @@ import numpy as np
 from sklearn.model_selection import TimeSeriesSplit
 from xgboost import XGBClassifier
 from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, confusion_matrix
 import joblib
 import re
+import os
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
+MODEL_DIR = os.getenv("MODEL_DIR", "models/")
 
 # Global variables to hold model, scaler, encoders, and latest player stats for inference
 model = None
@@ -48,7 +58,9 @@ def count_sets_won(score_str):
                 pass
     return w_sets, l_sets
 
-def load_and_engineer_data(filepath="cleaned_atp_data.csv"):
+def load_and_engineer_data(filepath=None):
+    if filepath is None:
+        filepath = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
     df = pd.read_csv(filepath)
     df['tourney_date'] = pd.to_datetime(df['tourney_date'], format='%Y%m%d')
     df = df.sort_values('tourney_date').reset_index(drop=True)
@@ -364,6 +376,11 @@ def preprocess_and_train():
         learning_rate=0.05,
         max_depth=6,
         subsample=0.8,
+        colsample_bytree=0.8,
+        min_child_weight=3,
+        gamma=0.1,
+        tree_method='hist',
+        n_jobs=1,
         early_stopping_rounds=50,
         random_state=42,
         eval_metric='logloss'
@@ -390,25 +407,28 @@ def preprocess_and_train():
     importances = model.feature_importances_
     indices = np.argsort(importances)[::-1]
 
-    plt.figure(figsize=(10, 6))
-    plt.title("Feature Importances")
-    plt.bar(range(X.shape[1]), importances[indices], align="center")
-    plt.xticks(range(X.shape[1]), [features[i] for i in indices], rotation=45, ha='right')
-    plt.xlim([-1, X.shape[1]])
-    plt.tight_layout()
-    plt.savefig("feature_importances.png")
-    print("Saved feature_importances.png")
+    if MATPLOTLIB_AVAILABLE:
+        plt.figure(figsize=(10, 6))
+        plt.title("Feature Importances")
+        plt.bar(range(X.shape[1]), importances[indices], align="center")
+        plt.xticks(range(X.shape[1]), [features[i] for i in indices], rotation=45, ha='right')
+        plt.xlim([-1, X.shape[1]])
+        plt.tight_layout()
+        plot_path = os.path.join(MODEL_DIR, "feature_importances.png")
+        plt.savefig(plot_path)
+        print(f"Saved {plot_path}")
+    else:
+        print("matplotlib is not installed. Skipping feature importances plot generation.")
 
-    import os
-    os.makedirs("/app/models", exist_ok=True)
+    os.makedirs(MODEL_DIR, exist_ok=True)
 
-    print("Saving model, preprocessors, and inference dictionaries to /app/models/...")
-    joblib.dump(model, "/app/models/tennis_model.joblib")
-    joblib.dump(scaler, "/app/models/scaler.joblib")
-    joblib.dump(label_encoders, "/app/models/label_encoders.joblib")
-    joblib.dump(latest_player_stats, "/app/models/latest_player_stats.joblib")
-    joblib.dump(latest_h2h, "/app/models/latest_h2h.joblib")
-    print("Saved all artifacts to /app/models/")
+    print(f"Saving model, preprocessors, and inference dictionaries to {MODEL_DIR}...")
+    joblib.dump(model, os.path.join(MODEL_DIR, "tennis_model.joblib"))
+    joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler.joblib"))
+    joblib.dump(label_encoders, os.path.join(MODEL_DIR, "label_encoders.joblib"))
+    joblib.dump(latest_player_stats, os.path.join(MODEL_DIR, "latest_player_stats.joblib"))
+    joblib.dump(latest_h2h, os.path.join(MODEL_DIR, "latest_h2h.joblib"))
+    print(f"Saved all artifacts to {MODEL_DIR}")
 
 def predict_match(player_a_name, player_b_name, surface, tourney_level='G'):
     global model, scaler, label_encoders, latest_player_stats, latest_h2h

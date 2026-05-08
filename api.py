@@ -1,22 +1,38 @@
 import os
-import subprocess
+
+# Restrict linear algebra backend thread counts to prevent memory allocation 
+# crashes when Uvicorn spins up reloader processes.
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+
 import joblib
 import pandas as pd
 import requests
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # --- CONFIGURATION ---
-ODDS_API_KEY = os.getenv("ODDS_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db") # Fallback for local testing
-MODEL_DIR = "/app/models/"
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "8889db8b63391328c4478c3ee26cba48")
+DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:root@localhost:3306/tennis_db") # Fallback for local testing
+MODEL_DIR = os.getenv("MODEL_DIR", "models/")
 
 # Ensure volume dir exists
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 # --- DATABASE SETUP ---
+url = make_url(DATABASE_URL)
+# Only attempt creation if it's a MySQL URL and specifies a database
+if url.database and url.drivername.startswith("mysql"):
+    db_name = url.database
+    server_url = url.set(database='')
+    server_engine = create_engine(server_url, isolation_level="AUTOCOMMIT")
+    with server_engine.connect() as conn:
+        conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -26,14 +42,17 @@ class Prediction(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     match_date = Column(Date, index=True)
-    tournament = Column(String)
-    player_a = Column(String)
-    player_b = Column(String)
+    tournament = Column(String(255))
+    player_a = Column(String(255))
+    player_b = Column(String(255))
     player_a_prob = Column(Float)
     player_b_prob = Column(Float)
     player_a_odds = Column(Float)
     player_b_odds = Column(Float)
-    is_value_bet = Column(Boolean)
+    value_bet_on_player = Column(String(255), nullable=True)
+    match_completed = Column(Boolean, default=False)
+    winner = Column(String(255), nullable=True)
+    score = Column(String(255), nullable=True)
 
 Base.metadata.create_all(bind=engine)
 
@@ -127,7 +146,7 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
     df_pred = df_pred[features]
 
     probs = model.predict_proba(df_pred)[0]
-    return probs[1], probs[0] # P(Player A), P(Player B)
+    return float(probs[1]), float(probs[0]) # P(Player A), P(Player B)
 
 # --- ENDPOINTS ---
 
@@ -190,11 +209,11 @@ def run_daily_predictions():
                 p_home_win, p_away_win = probs
 
                 # Value Logic: Flag if Model Prob > (1 / Decimal Odds) + 0.05
-                is_value = False
+                value_bet_player = None
                 if p_home_win > (1.0 / home_odds) + 0.05:
-                    is_value = True
+                    value_bet_player = home_team
                 elif p_away_win > (1.0 / away_odds) + 0.05:
-                    is_value = True
+                    value_bet_player = away_team
 
                 prediction_record = Prediction(
                     match_date=commence_time,
@@ -205,7 +224,7 @@ def run_daily_predictions():
                     player_b_prob=p_away_win,
                     player_a_odds=home_odds,
                     player_b_odds=away_odds,
-                    is_value_bet=is_value
+                    value_bet_on_player=value_bet_player
                 )
                 db.add(prediction_record)
 
@@ -218,7 +237,10 @@ def run_daily_predictions():
                     "player_b_prob": p_away_win,
                     "player_a_odds": home_odds,
                     "player_b_odds": away_odds,
-                    "is_value_bet": is_value
+                "value_bet_on_player": value_bet_player,
+                "match_completed": False,
+                "winner": None,
+                "score": None
                 })
 
         # Phase C: Persistence
@@ -231,23 +253,74 @@ def run_daily_predictions():
 
     return results
 
+@app.post("/update-results")
+def update_results():
+    if not ODDS_API_KEY:
+        raise HTTPException(status_code=500, detail="ODDS_API_KEY is not set.")
+
+    db = SessionLocal()
+    updated_count = 0
+    try:
+        # Query pending predictions
+        pending_preds = db.query(Prediction).filter(Prediction.match_completed == False).all()
+        if not pending_preds:
+            return {"status": "No pending matches to update.", "updated": 0}
+
+        # Extract unique tournaments to query the scores endpoint efficiently
+        tournaments = set(p.tournament for p in pending_preds)
+
+        for tourney in tournaments:
+            # Look back 3 days to catch recently completed matches
+            scores_url = f"https://api.the-odds-api.com/v4/sports/{tourney}/scores/?apiKey={ODDS_API_KEY}&daysFrom=3"
+            resp = requests.get(scores_url)
+            if resp.status_code != 200:
+                continue
+
+            scores_data = resp.json()
+            
+            # Create a lookup mapping (home_team, away_team) -> match_data
+            scores_map = {(m.get('home_team'), m.get('away_team')): m for m in scores_data}
+
+            for pred in pending_preds:
+                if pred.tournament == tourney:
+                    match_info = scores_map.get((pred.player_a, pred.player_b))
+                    
+                    if match_info and match_info.get('completed'):
+                        pred.match_completed = True
+                        scores = match_info.get('scores')
+                        
+                        if scores and len(scores) == 2:
+                            s1, s2 = scores[0], scores[1]
+                            pred.score = f"{s1['name']} {s1['score']} - {s2['score']} {s2['name']}"
+                            try:
+                                if int(s1['score']) > int(s2['score']):
+                                    pred.winner = s1['name']
+                                elif int(s2['score']) > int(s1['score']):
+                                    pred.winner = s2['name']
+                            except (ValueError, TypeError):
+                                pass
+                        updated_count += 1
+        db.commit()
+        return {"status": "Success", "updated_matches": updated_count}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
+
 @app.post("/retrain")
 def retrain_model(background_tasks: BackgroundTasks):
 
     def retrain_task():
         # Trigger full retraining
         try:
+            import data_fetcher
+            data_fetcher.fetch_and_process_data()
+
             import train_model
-            # Re-fetch data if needed, or just retrain. The prompt says "using latest historical CSV data"
-            # so we'll just run preprocess_and_train which loads cleaned_atp_data.csv and overwrites joblibs
             train_model.preprocess_and_train()
 
-            # Git Sync
-            subprocess.run(["git", "add", "cleaned_atp_data.csv", "feature_importances.png", MODEL_DIR], check=True)
-            subprocess.run(["git", "commit", "-m", "Auto-update model brain [skip ci]"], check=True)
-            subprocess.run(["git", "push"], check=True)
-
-            print("Retraining and sync complete.")
+            print("Retraining complete. Models saved to persistent volume.")
         except Exception as e:
             print(f"Retraining task failed: {e}")
 

@@ -1,9 +1,11 @@
 fastapi
 uvicorn
-sqlalchemy
-psycopg2-binary
-xgboost
-scikit-learn
-joblib
-pandas
 requests
+sqlalchemy
+pymysql
+cryptography
+pandas
+scikit-learn
+xgboost
+joblib
+matplotlib

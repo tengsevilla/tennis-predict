@@ -1,7 +1,9 @@
 import pandas as pd
 import datetime
-import urllib.request
 import urllib.error
+import os
+
+MODEL_DIR = os.getenv("MODEL_DIR", "models/")
 
 def fetch_and_process_data():
     base_url = "https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_{}.csv"
@@ -39,7 +41,8 @@ def fetch_and_process_data():
     print(f"Total rows after cleaning: {final_rows} (Dropped {initial_rows - final_rows} rows)")
 
     # Save the cleaned output
-    output_file = "cleaned_atp_data.csv"
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    output_file = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
     print(f"Saving to {output_file}...")
     cleaned_df.to_csv(output_file, index=False)
     print("Done!")

@@ -1,0 +1,13 @@
+# Environments
+__pycache__/
+*.pyc
+.env
+venv/
+.venv/
+env/
+
+# Data & Models
+models/
+cleaned_atp_data.csv
+atp_matches_*.csv
+feature_importances.png
