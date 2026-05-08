@@ -333,3 +333,21 @@ def retrain_model(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(retrain_task)
     return {"status": "Retraining task initiated in the background."}
+
+@app.get("/verify-volume")
+def verify_volume():
+    import os
+    try:
+        files = os.listdir(MODEL_DIR)
+        file_details = []
+        for file in files:
+            size_mb = os.path.getsize(os.path.join(MODEL_DIR, file)) / (1024 * 1024)
+            file_details.append({"filename": file, "size_mb": round(size_mb, 2)})
+            
+        return {
+            "volume_path": MODEL_DIR,
+            "status": "Volume is attached and readable" if files else "Volume is empty",
+            "files": file_details
+        }
+    except Exception as e:
+        return {"error": str(e), "message": "Volume path not found."}
