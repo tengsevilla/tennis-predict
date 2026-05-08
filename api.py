@@ -14,10 +14,17 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, D
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+import pymysql
+pymysql.install_as_MySQLdb()
 
 # --- CONFIGURATION ---
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "8889db8b63391328c4478c3ee26cba48")
 DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:root@localhost:3306/tennis_db") # Fallback for local testing
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DATABASE_URL = "mysql+pymysql://root:root@localhost:3306/tennis_db"
+elif DATABASE_URL.startswith("mysql://"):
+    DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
 MODEL_DIR = os.getenv("MODEL_DIR", "models/")
 
 # Ensure volume dir exists
