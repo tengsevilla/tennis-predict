@@ -399,11 +399,16 @@ def preprocess_and_train():
     plt.savefig("feature_importances.png")
     print("Saved feature_importances.png")
 
-    print("Saving model and preprocessors using joblib...")
-    joblib.dump(model, "tennis_model.joblib")
-    joblib.dump(scaler, "scaler.joblib")
-    joblib.dump(label_encoders, "label_encoders.joblib")
-    print("Saved tennis_model.joblib, scaler.joblib, and label_encoders.joblib")
+    import os
+    os.makedirs("/app/models", exist_ok=True)
+
+    print("Saving model, preprocessors, and inference dictionaries to /app/models/...")
+    joblib.dump(model, "/app/models/tennis_model.joblib")
+    joblib.dump(scaler, "/app/models/scaler.joblib")
+    joblib.dump(label_encoders, "/app/models/label_encoders.joblib")
+    joblib.dump(latest_player_stats, "/app/models/latest_player_stats.joblib")
+    joblib.dump(latest_h2h, "/app/models/latest_h2h.joblib")
+    print("Saved all artifacts to /app/models/")
 
 def predict_match(player_a_name, player_b_name, surface, tourney_level='G'):
     global model, scaler, label_encoders, latest_player_stats, latest_h2h
