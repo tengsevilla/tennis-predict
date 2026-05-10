@@ -200,8 +200,8 @@ def run_daily_predictions():
                 if commence_time_dt < pd.Timestamp.utcnow():
                     continue
                     
-                # Convert from UTC to GMT+8 (Etc/GMT-8), then extract the date
-                commence_time = commence_time_dt.tz_convert('Etc/GMT-8').date()
+                # Extract the date in UTC
+                commence_time = commence_time_dt.date()
 
                 # Get best odds across bookmakers
                 home_odds = 0
@@ -296,8 +296,7 @@ def update_results():
         if not pending_preds:
             return {"status": "No pending matches to update.", "updated": 0}
 
-        # Calculate current date in GMT+8 to match prediction records
-        end_date = datetime.utcnow() + timedelta(hours=8)
+        end_date = datetime.now()
         start_date = end_date - timedelta(days=7)
         date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
         scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
