@@ -9,7 +9,9 @@ os.environ["MKL_NUM_THREADS"] = "1"
 import joblib
 import pandas as pd
 import requests
+from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from datetime import datetime, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
@@ -215,11 +217,11 @@ def run_daily_predictions():
 
                 p_home_win, p_away_win = probs
 
-                # Value Logic: Flag if Model Prob > (1 / Decimal Odds) + 0.05
+                # Prediction Logic: Pick the player with the highest model probability regardless of odds
                 value_bet_player = None
-                if p_home_win > (1.0 / home_odds) + 0.05:
+                if p_home_win > p_away_win:
                     value_bet_player = home_team
-                elif p_away_win > (1.0 / away_odds) + 0.05:
+                elif p_away_win > p_home_win:
                     value_bet_player = away_team
 
                 prediction_record = Prediction(
@@ -262,9 +264,6 @@ def run_daily_predictions():
 
 @app.post("/update-results")
 def update_results():
-    if not ODDS_API_KEY:
-        raise HTTPException(status_code=500, detail="ODDS_API_KEY is not set.")
-
     db = SessionLocal()
     updated_count = 0
     try:
@@ -273,40 +272,61 @@ def update_results():
         if not pending_preds:
             return {"status": "No pending matches to update.", "updated": 0}
 
-        # Extract unique tournaments to query the scores endpoint efficiently
-        tournaments = set(p.tournament for p in pending_preds)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=7)
+        date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
+        scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
+        
+        resp = requests.get(scores_url)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to fetch scores from ESPN.")
 
-        for tourney in tournaments:
-            # Look back 3 days to catch recently completed matches
-            scores_url = f"https://api.the-odds-api.com/v4/sports/{tourney}/scores/?apiKey={ODDS_API_KEY}&daysFrom=3"
-            resp = requests.get(scores_url)
-            if resp.status_code != 200:
-                continue
+        scores_data = resp.json()
+        
+        scores_map = {}
+        for event in scores_data.get('events', []):
+            for grouping in event.get('groupings', []):
+                for competition in grouping.get('competitions', []):
+                    status = competition.get('status', {}).get('type', {})
+                    if status.get('completed'):
+                        competitors = competition.get('competitors', [])
+                        if len(competitors) == 2:
+                            c1, c2 = competitors[0], competitors[1]
+                            
+                            p1_name = c1.get('athlete', {}).get('displayName')
+                            p2_name = c2.get('athlete', {}).get('displayName')
+                            
+                            p1_winner = c1.get('winner', False)
+                            p2_winner = c2.get('winner', False)
+                            
+                            winner_name = p1_name if p1_winner else (p2_name if p2_winner else None)
+                            
+                            c1_linescores = c1.get('linescores', [])
+                            c2_linescores = c2.get('linescores', [])
+                            score_str = ""
+                            
+                            if c1_linescores and c2_linescores and len(c1_linescores) == len(c2_linescores):
+                                sets = []
+                                for i in range(len(c1_linescores)):
+                                    sets.append(f"{int(c1_linescores[i].get('value', 0))}-{int(c2_linescores[i].get('value', 0))}")
+                                score_str = f"{p1_name} {', '.join(sets)} {p2_name}"
+                            
+                            match_info = {'winner': winner_name, 'score': score_str}
+                            if p1_name and p2_name:
+                                # Use lowercase to make matching more robust
+                                scores_map[(p1_name.lower(), p2_name.lower())] = match_info
+                                scores_map[(p2_name.lower(), p1_name.lower())] = match_info
 
-            scores_data = resp.json()
+        for pred in pending_preds:
+            p_a, p_b = pred.player_a.lower(), pred.player_b.lower()
             
-            # Create a lookup mapping (home_team, away_team) -> match_data
-            scores_map = {(m.get('home_team'), m.get('away_team')): m for m in scores_data}
-
-            for pred in pending_preds:
-                if pred.tournament == tourney:
-                    match_info = scores_map.get((pred.player_a, pred.player_b))
-                    
-                    if match_info and match_info.get('completed'):
-                        pred.match_completed = True
-                        scores = match_info.get('scores')
-                        
-                        if scores and len(scores) == 2:
-                            s1, s2 = scores[0], scores[1]
-                            pred.score = f"{s1['name']} {s1['score']} - {s2['score']} {s2['name']}"
-                            try:
-                                if int(s1['score']) > int(s2['score']):
-                                    pred.winner = s1['name']
-                                elif int(s2['score']) > int(s1['score']):
-                                    pred.winner = s2['name']
-                            except (ValueError, TypeError):
-                                pass
-                        updated_count += 1
+            match_info = scores_map.get((p_a, p_b))
+            if match_info:
+                pred.match_completed = True
+                pred.winner = match_info['winner']
+                pred.score = match_info['score']
+                updated_count += 1
+                
         db.commit()
         return {"status": "Success", "updated_matches": updated_count}
     except Exception as e:
@@ -351,3 +371,76 @@ def verify_volume():
         }
     except Exception as e:
         return {"error": str(e), "message": "Volume path not found."}
+
+@app.get("/predictions")
+def get_predictions(
+    match_date: Optional[str] = None,
+    tournament: Optional[str] = None,
+    match_completed: Optional[bool] = None,
+    limit: int = 100,
+    offset: int = 0
+):
+    db = SessionLocal()
+    try:
+        query = db.query(Prediction)
+        
+        # Apply optional filters
+        if match_date:
+            query = query.filter(Prediction.match_date == match_date)
+        if tournament:
+            query = query.filter(Prediction.tournament == tournament)
+        if match_completed is not None:
+            query = query.filter(Prediction.match_completed == match_completed)
+            
+        total_matches = query.count()
+        
+        predictions = query.offset(offset).limit(limit).all()
+        
+        total_value_bets = 0
+        successful_value_bets = 0
+        
+        results = []
+        for p in predictions:
+            results.append({
+                "id": p.id,
+                "match_date": p.match_date.isoformat() if p.match_date else None,
+                "tournament": p.tournament,
+                "player_a": p.player_a,
+                "player_b": p.player_b,
+                "player_a_prob": p.player_a_prob,
+                "player_b_prob": p.player_b_prob,
+                "player_a_odds": p.player_a_odds,
+                "player_b_odds": p.player_b_odds,
+                "value_bet_on_player": p.value_bet_on_player,
+                "match_completed": p.match_completed,
+                "winner": p.winner,
+                "score": p.score
+            })
+            
+            # Calculate hit rate only on matches that are completed, had a value bet, and have a confirmed winner
+            if p.match_completed and p.value_bet_on_player and p.winner:
+                total_value_bets += 1
+                if p.value_bet_on_player.lower() == p.winner.lower():
+                    successful_value_bets += 1
+                    
+        prediction_rate = 0.0
+        if total_value_bets > 0:
+            prediction_rate = round((successful_value_bets / total_value_bets) * 100, 2)
+            
+        return {
+            "pagination": {
+                "total_matches": total_matches,
+                "limit": limit,
+                "offset": offset
+            },
+            "data": results,
+            "stats": {
+                "total_value_bets_evaluated": total_value_bets,
+                "successful_value_bets": successful_value_bets,
+                "prediction_rate_percent": prediction_rate
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
