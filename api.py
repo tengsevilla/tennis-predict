@@ -192,7 +192,16 @@ def run_daily_predictions():
             for match in matches:
                 home_team = match.get('home_team')
                 away_team = match.get('away_team')
-                commence_time = pd.to_datetime(match.get('commence_time')).date()
+                
+                # Parse as UTC-aware safely to avoid TypeError
+                commence_time_dt = pd.to_datetime(match.get('commence_time'), utc=True)
+                
+                # Prevent predicting on matches that have already started
+                if commence_time_dt < pd.Timestamp.utcnow():
+                    continue
+                    
+                # Convert from UTC to GMT+8 (Etc/GMT-8), then extract the date
+                commence_time = commence_time_dt.tz_convert('Etc/GMT-8').date()
 
                 # Get best odds across bookmakers
                 home_odds = 0
@@ -224,18 +233,33 @@ def run_daily_predictions():
                 elif p_away_win > p_home_win:
                     value_bet_player = away_team
 
-                prediction_record = Prediction(
-                    match_date=commence_time,
-                    tournament=key,
-                    player_a=home_team,
-                    player_b=away_team,
-                    player_a_prob=p_home_win,
-                    player_b_prob=p_away_win,
-                    player_a_odds=home_odds,
-                    player_b_odds=away_odds,
-                    value_bet_on_player=value_bet_player
-                )
-                db.add(prediction_record)
+                # Check if this match already exists in the database
+                existing_prediction = db.query(Prediction).filter(
+                    Prediction.player_a == home_team,
+                    Prediction.player_b == away_team,
+                    Prediction.match_date == commence_time
+                ).first()
+
+                if existing_prediction:
+                    # Update existing record with latest odds/probs
+                    existing_prediction.player_a_prob = p_home_win
+                    existing_prediction.player_b_prob = p_away_win
+                    existing_prediction.player_a_odds = home_odds
+                    existing_prediction.player_b_odds = away_odds
+                    existing_prediction.value_bet_on_player = value_bet_player
+                else:
+                    prediction_record = Prediction(
+                        match_date=commence_time,
+                        tournament=key,
+                        player_a=home_team,
+                        player_b=away_team,
+                        player_a_prob=p_home_win,
+                        player_b_prob=p_away_win,
+                        player_a_odds=home_odds,
+                        player_b_odds=away_odds,
+                        value_bet_on_player=value_bet_player
+                    )
+                    db.add(prediction_record)
 
                 results.append({
                     "match_date": str(commence_time),
@@ -272,7 +296,8 @@ def update_results():
         if not pending_preds:
             return {"status": "No pending matches to update.", "updated": 0}
 
-        end_date = datetime.now()
+        # Calculate current date in GMT+8 to match prediction records
+        end_date = datetime.utcnow() + timedelta(hours=8)
         start_date = end_date - timedelta(days=7)
         date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
         scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
