@@ -12,7 +12,7 @@ import requests
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from datetime import datetime, timedelta
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, text
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, DateTime, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -50,7 +50,7 @@ class Prediction(Base):
     __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True, index=True)
-    match_date = Column(Date, index=True)
+    match_date = Column(String(255), index=True)
     tournament = Column(String(255))
     player_a = Column(String(255))
     player_b = Column(String(255))
@@ -193,15 +193,17 @@ def run_daily_predictions():
                 home_team = match.get('home_team')
                 away_team = match.get('away_team')
                 
+                raw_commence_time = match.get('commence_time')
+
                 # Parse as UTC-aware safely to avoid TypeError
-                commence_time_dt = pd.to_datetime(match.get('commence_time'), utc=True)
+                commence_time_dt = pd.to_datetime(raw_commence_time, utc=True)
                 
                 # Prevent predicting on matches that have already started
                 if commence_time_dt < pd.Timestamp.utcnow():
                     continue
                     
-                # Extract the date in UTC
-                commence_time = commence_time_dt.date()
+                # Store the exact string from the API (includes timezone)
+                commence_time = raw_commence_time
 
                 # Get best odds across bookmakers
                 home_odds = 0
@@ -427,7 +429,7 @@ def get_predictions(
         for p in predictions:
             results.append({
                 "id": p.id,
-                "match_date": p.match_date.isoformat() if p.match_date else None,
+                "match_date": p.match_date,
                 "tournament": p.tournament,
                 "player_a": p.player_a,
                 "player_b": p.player_b,
