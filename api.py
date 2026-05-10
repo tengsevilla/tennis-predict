@@ -382,7 +382,7 @@ def get_predictions(
 ):
     db = SessionLocal()
     try:
-        query = db.query(Prediction)
+        query = db.query(Prediction).filter(Prediction.value_bet_on_player.isnot(None))
         
         # Apply optional filters
         if match_date:
