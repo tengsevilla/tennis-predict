@@ -108,17 +108,20 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
         'player_a_rank': a_stats['rank'],
         'player_a_age': a_stats['age'],
         'player_a_hand': a_stats['hand'],
+        'player_a_elo': a_stats.get('elo', 1500),
         'player_a_recent_win_pct': a_stats['recent_win_pct'],
         'player_a_serve_win_pct': a_stats['serve_win_pct'],
         'player_a_return_win_pct': a_stats['return_win_pct'],
         'player_a_sets_dropped_avg': a_stats['sets_dropped_avg'],
         'player_a_surface_win_pct': a_surf_pct,
         'point_difference': a_stats['points'] - b_stats['points'],
+        'elo_difference': a_stats.get('elo', 1500) - b_stats.get('elo', 1500),
         'h2h_win_pct': a_h2h,
 
         'player_b_rank': b_stats['rank'],
         'player_b_age': b_stats['age'],
         'player_b_hand': b_stats['hand'],
+        'player_b_elo': b_stats.get('elo', 1500),
         'player_b_recent_win_pct': b_stats['recent_win_pct'],
         'player_b_serve_win_pct': b_stats['serve_win_pct'],
         'player_b_return_win_pct': b_stats['return_win_pct'],
@@ -134,6 +137,7 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
     categorical_cols = ['surface', 'tourney_level', 'player_a_hand', 'player_b_hand']
     numerical_cols = [
         'player_a_rank', 'player_a_age',
+        'player_a_elo', 'player_b_elo', 'elo_difference',
         'player_a_recent_win_pct', 'player_a_serve_win_pct', 'player_a_return_win_pct', 'player_a_sets_dropped_avg',
         'player_a_surface_win_pct', 'point_difference', 'h2h_win_pct',
         'player_b_rank', 'player_b_age',

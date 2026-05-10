@@ -26,6 +26,7 @@ latest_player_stats = {}
 categorical_cols = ['surface', 'tourney_level', 'player_a_hand', 'player_b_hand']
 numerical_cols = [
     'player_a_rank', 'player_a_age',
+    'player_a_elo', 'player_b_elo', 'elo_difference',
     'player_a_recent_win_pct', 'player_a_serve_win_pct', 'player_a_return_win_pct', 'player_a_sets_dropped_avg',
     'player_a_surface_win_pct', 'point_difference', 'h2h_win_pct',
     'player_b_rank', 'player_b_age',
@@ -58,6 +59,34 @@ def count_sets_won(score_str):
                 pass
     return w_sets, l_sets
 
+def calculate_elo(df, k_factor=32, base_rating=1500):
+    """Calculates chronological Elo ratings for all matches in the DataFrame."""
+    elo_dict = {}
+    winner_elos = []
+    loser_elos = []
+
+    for idx, row in df.iterrows():
+        w_id = row['winner_id']
+        l_id = row['loser_id']
+
+        w_elo = elo_dict.get(w_id, base_rating)
+        l_elo = elo_dict.get(l_id, base_rating)
+
+        winner_elos.append(w_elo)
+        loser_elos.append(l_elo)
+
+        # Calculate Expected Win Probability
+        expected_w = 1 / (1 + 10 ** ((l_elo - w_elo) / 400))
+        expected_l = 1 / (1 + 10 ** ((w_elo - l_elo) / 400))
+
+        # Update Elo Ratings
+        elo_dict[w_id] = w_elo + k_factor * (1 - expected_w)
+        elo_dict[l_id] = l_elo + k_factor * (0 - expected_l)
+
+    df['winner_elo'] = winner_elos
+    df['loser_elo'] = loser_elos
+    return df, elo_dict
+
 def load_and_engineer_data(filepath=None):
     if filepath is None:
         filepath = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
@@ -68,6 +97,9 @@ def load_and_engineer_data(filepath=None):
     # Fill NAs
     df['winner_rank_points'] = df['winner_rank_points'].fillna(0)
     df['loser_rank_points'] = df['loser_rank_points'].fillna(0)
+
+    # Calculate chronological Elo before slicing dataframe
+    df, final_elos = calculate_elo(df)
 
     # Also calculate sets won for rolling stats
     w_sets_dropped = []
@@ -217,6 +249,7 @@ def load_and_engineer_data(filepath=None):
         latest_player_stats[name] = {
             'id': pid,
             'rank': rank, 'age': age, 'points': points, 'hand': hand,
+            'elo': final_elos.get(pid, 1500),
             'recent_win_pct': last_row['final_recent_win_pct'],
             'serve_win_pct': last_row['final_serve_win_pct'],
             'return_win_pct': last_row['final_return_win_pct'],
@@ -248,6 +281,7 @@ def balance_dataset(df):
         w_name = row['winner_name']
         w_rank = row['winner_rank']
         w_points = row['winner_rank_points']
+        w_elo = row['winner_elo']
         w_age = row['winner_age']
         w_hand = row['winner_hand']
         w_recent_win_pct = row['winner_recent_win_pct']
@@ -261,6 +295,7 @@ def balance_dataset(df):
         l_name = row['loser_name']
         l_rank = row['loser_rank']
         l_points = row['loser_rank_points']
+        l_elo = row['loser_elo']
         l_age = row['loser_age']
         l_hand = row['loser_hand']
         l_recent_win_pct = row['loser_recent_win_pct']
@@ -286,17 +321,20 @@ def balance_dataset(df):
             'player_a_rank': w_rank,
             'player_a_age': w_age,
             'player_a_hand': w_hand,
+            'player_a_elo': w_elo,
             'player_a_recent_win_pct': w_recent_win_pct,
             'player_a_serve_win_pct': w_serve_win_pct,
             'player_a_return_win_pct': w_return_win_pct,
             'player_a_sets_dropped_avg': w_sets_dropped_avg,
             'player_a_surface_win_pct': w_surface_win_pct,
             'point_difference': w_points - l_points,
+            'elo_difference': w_elo - l_elo,
             'h2h_win_pct': w_h2h,
 
             'player_b_rank': l_rank,
             'player_b_age': l_age,
             'player_b_hand': l_hand,
+            'player_b_elo': l_elo,
             'player_b_recent_win_pct': l_recent_win_pct,
             'player_b_serve_win_pct': l_serve_win_pct,
             'player_b_return_win_pct': l_return_win_pct,
@@ -317,17 +355,20 @@ def balance_dataset(df):
             'player_a_rank': l_rank,
             'player_a_age': l_age,
             'player_a_hand': l_hand,
+            'player_a_elo': l_elo,
             'player_a_recent_win_pct': l_recent_win_pct,
             'player_a_serve_win_pct': l_serve_win_pct,
             'player_a_return_win_pct': l_return_win_pct,
             'player_a_sets_dropped_avg': l_sets_dropped_avg,
             'player_a_surface_win_pct': l_surface_win_pct,
             'point_difference': l_points - w_points,
+            'elo_difference': l_elo - w_elo,
             'h2h_win_pct': l_h2h,
 
             'player_b_rank': w_rank,
             'player_b_age': w_age,
             'player_b_hand': w_hand,
+            'player_b_elo': w_elo,
             'player_b_recent_win_pct': w_recent_win_pct,
             'player_b_serve_win_pct': w_serve_win_pct,
             'player_b_return_win_pct': w_return_win_pct,
@@ -462,17 +503,20 @@ def predict_match(player_a_name, player_b_name, surface, tourney_level='G'):
         'player_a_rank': a_stats['rank'],
         'player_a_age': a_stats['age'],
         'player_a_hand': a_stats['hand'],
+        'player_a_elo': a_stats.get('elo', 1500),
         'player_a_recent_win_pct': a_stats['recent_win_pct'],
         'player_a_serve_win_pct': a_stats['serve_win_pct'],
         'player_a_return_win_pct': a_stats['return_win_pct'],
         'player_a_sets_dropped_avg': a_stats['sets_dropped_avg'],
         'player_a_surface_win_pct': a_surf_pct,
         'point_difference': a_stats['points'] - b_stats['points'],
+        'elo_difference': a_stats.get('elo', 1500) - b_stats.get('elo', 1500),
         'h2h_win_pct': a_h2h,
 
         'player_b_rank': b_stats['rank'],
         'player_b_age': b_stats['age'],
         'player_b_hand': b_stats['hand'],
+        'player_b_elo': b_stats.get('elo', 1500),
         'player_b_recent_win_pct': b_stats['recent_win_pct'],
         'player_b_serve_win_pct': b_stats['serve_win_pct'],
         'player_b_return_win_pct': b_stats['return_win_pct'],
