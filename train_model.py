@@ -332,6 +332,10 @@ def preprocess_and_train(years_back=5):
     # Drop NAs if any remain
     balanced_df = balanced_df.dropna(subset=features + ['target'])
 
+    # Capture rank arrays for baseline comparison (positionally aligned with X/y)
+    player_a_rank_arr = balanced_df['player_a_rank'].fillna(9999).values
+    player_b_rank_arr = balanced_df['player_b_rank'].fillna(9999).values
+
     X = balanced_df[features].copy()
     y = balanced_df['target'].copy()
 
@@ -375,8 +379,10 @@ def preprocess_and_train(years_back=5):
         )
 
     y_pred = model.predict(X_test)
+    rank_baseline = (player_a_rank_arr[test_index] < player_b_rank_arr[test_index]).astype(int)
     print("\n--- Evaluation on Last Time Split ---")
-    print(f"Overall Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+    print(f"Rank Baseline Accuracy: {accuracy_score(y_test, rank_baseline):.4f}")
+    print(f"Model Accuracy:         {accuracy_score(y_test, y_pred):.4f}")
     print("\nConfusion Matrix:")
     print(confusion_matrix(y_test, y_pred))
 

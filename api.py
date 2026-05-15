@@ -1,6 +1,8 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
-# Restrict linear algebra backend thread counts to prevent memory allocation 
+# Restrict linear algebra backend thread counts to prevent memory allocation
 # crashes when Uvicorn spins up reloader processes.
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -14,7 +16,8 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 import zipfile
 import io
-from datetime import datetime, timedelta
+import json
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, DateTime, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.declarative import declarative_base
@@ -23,7 +26,7 @@ import pymysql
 pymysql.install_as_MySQLdb()
 
 # --- CONFIGURATION ---
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "8889db8b63391328c4478c3ee26cba48")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:root@localhost:3306/tennis_db") # Fallback for local testing
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
@@ -31,6 +34,7 @@ if not DATABASE_URL:
 elif DATABASE_URL.startswith("mysql://"):
     DATABASE_URL = DATABASE_URL.replace("mysql://", "mysql+pymysql://", 1)
 MODEL_DIR = os.getenv("MODEL_DIR", "models/")
+RETRAIN_STATUS_FILE = os.path.join(MODEL_DIR, "retrain_status.json")
 
 # Ensure volume dir exists
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -112,7 +116,7 @@ def load_artifacts():
         print(f"Failed to load models: {e}")
         return None, None, None, None, None
 
-def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h):
+def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h, surface='Hard', tourney_level='A'):
     if player_a not in stats or player_b not in stats:
         return None
 
@@ -126,11 +130,6 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
 
     h2h = latest_h2h.get((p1, p2), 0.5)
     a_h2h = h2h if a_id == p1 else (1 - h2h)
-
-    # We don't necessarily know surface or tourney level for active odds API fetch natively without extra mapping
-    # Default to Hard court ('Hard') and generic level ('A') for generic daily predictions if unknown
-    surface = 'Hard'
-    tourney_level = 'A'
 
     a_surf_pct = a_stats['surface_pcts'].get(surface, 0.5)
     b_surf_pct = b_stats['surface_pcts'].get(surface, 0.5)
@@ -281,6 +280,7 @@ def run_daily_predictions():
             if odds_resp.status_code != 200:
                 continue
 
+            tournament_surface = _surface_from_event(key)
             matches = odds_resp.json()
             for match in matches:
                 home_team = match.get('home_team')
@@ -315,18 +315,20 @@ def run_daily_predictions():
                     continue
 
                 # Predict
-                probs = get_prediction_prob(home_team, away_team, model, scaler, le, stats, latest_h2h)
+                probs = get_prediction_prob(home_team, away_team, model, scaler, le, stats, latest_h2h, surface=tournament_surface)
                 if not probs:
                     continue # Players not in our dataset
 
                 p_home_win, p_away_win = probs
 
-                # Prediction Logic: Pick the player with the highest model probability regardless of odds
+                # Value bet: model probability must exceed the implied probability from the odds
+                implied_home = 1.0 / home_odds
+                implied_away = 1.0 / away_odds
+                home_edge = p_home_win - implied_home
+                away_edge = p_away_win - implied_away
                 value_bet_player = None
-                if p_home_win > p_away_win:
-                    value_bet_player = home_team
-                elif p_away_win > p_home_win:
-                    value_bet_player = away_team
+                if home_edge > 0 or away_edge > 0:
+                    value_bet_player = home_team if home_edge >= away_edge else away_team
 
                 # Check if this match already exists in the database
                 existing_prediction = db.query(Prediction).filter(
@@ -508,19 +510,41 @@ def update_results():
     finally:
         db.close()
 
+def _write_retrain_status(data: dict):
+    try:
+        with open(RETRAIN_STATUS_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
 @app.post("/retrain")
 def retrain_model(background_tasks: BackgroundTasks, years_back: int = 5):
 
     def retrain_task():
+        _write_retrain_status({"status": "running", "started_at": datetime.now(timezone.utc).isoformat(), "years_back": years_back})
         try:
             import train_model
             meta = train_model.preprocess_and_train(years_back=years_back)
+            _write_retrain_status({"status": "success", "completed_at": datetime.now(timezone.utc).isoformat(), "years_back": years_back, "meta": str(meta)})
             print(f"Retraining complete. Data freshness: {meta}")
         except Exception as e:
+            _write_retrain_status({"status": "failed", "failed_at": datetime.now(timezone.utc).isoformat(), "error": str(e)})
             print(f"Retraining task failed: {e}")
 
     background_tasks.add_task(retrain_task)
     return {"status": "Retraining task initiated in the background.", "years_back": years_back}
+
+
+@app.get("/retrain-status")
+def get_retrain_status():
+    if not os.path.exists(RETRAIN_STATUS_FILE):
+        return {"status": "no_retrain_recorded"}
+    try:
+        with open(RETRAIN_STATUS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 
 @app.get("/data-status")
