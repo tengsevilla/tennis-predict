@@ -80,9 +80,21 @@ class EspnMatch(Base):
     score = Column(String(255), nullable=True)
     p1_sets_won = Column(Integer, nullable=True)
     p2_sets_won = Column(Integer, nullable=True)
+    surface = Column(String(50), nullable=True)
 
 
 Base.metadata.create_all(bind=engine)
+
+# Add columns introduced after initial deployment without dropping existing tables
+with engine.connect() as _conn:
+    for _stmt in [
+        "ALTER TABLE espn_matches ADD COLUMN IF NOT EXISTS surface VARCHAR(50)",
+    ]:
+        try:
+            _conn.execute(text(_stmt))
+            _conn.commit()
+        except Exception:
+            pass
 
 # --- FASTAPI APP ---
 app = FastAPI(title="Tennis Oracle API")
@@ -179,6 +191,35 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
 
     probs = model.predict_proba(df_pred)[0]
     return float(probs[1]), float(probs[0]) # P(Player A), P(Player B)
+
+_SURFACE_MAP = {
+    'Clay': [
+        'internazionali', 'roland garros', 'french open', 'madrid', 'barcelona',
+        'monte-carlo', 'monte carlo', 'hamburg', 'geneva', 'lyon', 'munich',
+        'estoril', 'istanbul', 'bucharest', 'marrakech', 'houston', 'rio',
+        'buenos aires', 'santiago', 'cordoba', 'sao paulo', 'umag', 'kitzbuhel',
+        'gstaad', 'bastad', 'poznan', 'winston-salem',
+    ],
+    'Grass': [
+        'wimbledon', "queen's club", 'queens club', 'halle', 'eastbourne',
+        'hertogenbosch', 's-hertogenbosch', 'stuttgart',
+    ],
+    'Hard': [
+        'australian open', 'us open', 'miami', 'indian wells', 'montreal',
+        'cincinnati', 'toronto', 'paris', 'vienna', 'basel', 'metz', 'sofia',
+        'doha', 'dubai', 'acapulco', 'rotterdam', 'marseille', 'dallas',
+        'delray beach', 'atp finals', 'nitto', 'brisbane', 'auckland',
+        'adelaide', 'sydney', 'washington', 'los cabos', 'zhuhai',
+    ],
+}
+
+def _surface_from_event(event_name: str) -> str:
+    name = event_name.lower()
+    for surface, keywords in _SURFACE_MAP.items():
+        if any(kw in name for kw in keywords):
+            return surface
+    return 'Hard'  # most common surface; used when tournament name is unrecognised
+
 
 def _names_match(db_name: str, espn_name: str) -> bool:
     """Return True if db_name and espn_name refer to the same player.
@@ -358,6 +399,7 @@ def update_results():
     # We also check event.groupings[] as a defensive fallback in case the structure varies.
     completed_matches = []
     for event in scores_data.get('events', []):
+        surface = _surface_from_event(event.get('name', ''))
         competitions = event.get('competitions', [])
         if not competitions:
             for grouping in event.get('groupings', []):
@@ -409,6 +451,7 @@ def update_results():
                 'date': competition.get('date', ''),
                 'p1_sets_won': c1_sets_won,
                 'p2_sets_won': c2_sets_won,
+                'surface': surface,
             })
 
     db = SessionLocal()
@@ -429,6 +472,7 @@ def update_results():
                     player_2=m['p2'],
                     winner=m['winner'],
                     score=m['score'],
+                    surface=m['surface'],
                     p1_sets_won=m['p1_sets_won'],
                     p2_sets_won=m['p2_sets_won'],
                 ))
@@ -499,12 +543,19 @@ def data_status():
     # Training data freshness from cleaned CSV
     csv_path = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
     if os.path.exists(csv_path):
-        df_head = pd.read_csv(csv_path, usecols=['tourney_date'])
-        dates = pd.to_datetime(df_head['tourney_date'], format='%Y%m%d', errors='coerce')
-        most_recent = dates.max()
+        # Count rows without loading all data into memory
+        with open(csv_path, 'rb') as f:
+            row_count = sum(1 for _ in f) - 1  # subtract header
+
+        # CSV is sorted ascending by date — read only the last row for most recent date
+        df_last = pd.read_csv(
+            csv_path, usecols=['tourney_date'],
+            skiprows=range(1, row_count)  # skip all rows except the last
+        )
+        most_recent = pd.to_datetime(df_last['tourney_date'].iloc[0], format='%Y%m%d', errors='coerce')
         result["most_recent_training_match"] = most_recent.strftime('%Y-%m-%d') if pd.notna(most_recent) else "unknown"
         result["training_data_age_days"] = int((datetime.now() - most_recent).days) if pd.notna(most_recent) else None
-        result["training_rows"] = len(df_head)
+        result["training_rows"] = row_count
     else:
         result["training_data"] = "not found — run /retrain"
 
