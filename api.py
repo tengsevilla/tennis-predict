@@ -11,6 +11,9 @@ import pandas as pd
 import requests
 from typing import Optional
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import FileResponse, StreamingResponse
+import zipfile
+import io
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, Date, DateTime, text
 from sqlalchemy.engine import make_url
@@ -161,6 +164,21 @@ def get_prediction_prob(player_a, player_b, model, scaler, le, stats, latest_h2h
     probs = model.predict_proba(df_pred)[0]
     return float(probs[1]), float(probs[0]) # P(Player A), P(Player B)
 
+def _names_match(db_name: str, espn_name: str) -> bool:
+    """Return True if db_name and espn_name refer to the same player.
+
+    Handles cases where ESPN uses a longer official name (e.g. ESPN returns
+    "Carlos Alcaraz Garfia" while the Odds API returns "Carlos Alcaraz").
+    """
+    a = db_name.lower().strip()
+    b = espn_name.lower().strip()
+    if a == b:
+        return True
+    # All words in the shorter name must appear in the longer name
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return all(word in longer for word in shorter.split())
+
+
 # --- ENDPOINTS ---
 
 @app.post("/run-daily-predictions")
@@ -294,69 +312,82 @@ def run_daily_predictions():
 
 @app.post("/update-results")
 def update_results():
+    # Fetch ESPN scores outside the DB transaction so HTTPException propagates cleanly
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=7)
+    date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
+    scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
+
+    resp = requests.get(scores_url)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to fetch scores from ESPN.")
+
+    scores_data = resp.json()
+
+    # Parse completed matches from ESPN response.
+    # ESPN ATP scoreboard uses events[].competitions[] directly (no groupings level).
+    # We also check event.groupings[] as a defensive fallback in case the structure varies.
+    completed_matches = []
+    for event in scores_data.get('events', []):
+        competitions = event.get('competitions', [])
+        if not competitions:
+            for grouping in event.get('groupings', []):
+                competitions.extend(grouping.get('competitions', []))
+
+        for competition in competitions:
+            status = competition.get('status', {}).get('type', {})
+            if not status.get('completed'):
+                continue
+
+            competitors = competition.get('competitors', [])
+            if len(competitors) != 2:
+                continue
+
+            c1, c2 = competitors[0], competitors[1]
+            p1_name = c1.get('athlete', {}).get('displayName')
+            p2_name = c2.get('athlete', {}).get('displayName')
+            if not p1_name or not p2_name:
+                continue
+
+            winner_name = p1_name if c1.get('winner') else (p2_name if c2.get('winner') else None)
+
+            c1_lines = c1.get('linescores', [])
+            c2_lines = c2.get('linescores', [])
+            score_str = ""
+            if c1_lines and c2_lines and len(c1_lines) == len(c2_lines):
+                sets = [
+                    f"{int(c1_lines[i].get('value', 0))}-{int(c2_lines[i].get('value', 0))}"
+                    for i in range(len(c1_lines))
+                ]
+                score_str = f"{p1_name} {', '.join(sets)} {p2_name}"
+
+            completed_matches.append({
+                'p1': p1_name,
+                'p2': p2_name,
+                'winner': winner_name,
+                'score': score_str,
+            })
+
     db = SessionLocal()
     updated_count = 0
     try:
-        # Query pending predictions
         pending_preds = db.query(Prediction).filter(Prediction.match_completed == False).all()
         if not pending_preds:
             return {"status": "No pending matches to update.", "updated": 0}
 
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=7)
-        date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
-        scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
-        
-        resp = requests.get(scores_url)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to fetch scores from ESPN.")
-
-        scores_data = resp.json()
-        
-        scores_map = {}
-        for event in scores_data.get('events', []):
-            for grouping in event.get('groupings', []):
-                for competition in grouping.get('competitions', []):
-                    status = competition.get('status', {}).get('type', {})
-                    if status.get('completed'):
-                        competitors = competition.get('competitors', [])
-                        if len(competitors) == 2:
-                            c1, c2 = competitors[0], competitors[1]
-                            
-                            p1_name = c1.get('athlete', {}).get('displayName')
-                            p2_name = c2.get('athlete', {}).get('displayName')
-                            
-                            p1_winner = c1.get('winner', False)
-                            p2_winner = c2.get('winner', False)
-                            
-                            winner_name = p1_name if p1_winner else (p2_name if p2_winner else None)
-                            
-                            c1_linescores = c1.get('linescores', [])
-                            c2_linescores = c2.get('linescores', [])
-                            score_str = ""
-                            
-                            if c1_linescores and c2_linescores and len(c1_linescores) == len(c2_linescores):
-                                sets = []
-                                for i in range(len(c1_linescores)):
-                                    sets.append(f"{int(c1_linescores[i].get('value', 0))}-{int(c2_linescores[i].get('value', 0))}")
-                                score_str = f"{p1_name} {', '.join(sets)} {p2_name}"
-                            
-                            match_info = {'winner': winner_name, 'score': score_str}
-                            if p1_name and p2_name:
-                                # Use lowercase to make matching more robust
-                                scores_map[(p1_name.lower(), p2_name.lower())] = match_info
-                                scores_map[(p2_name.lower(), p1_name.lower())] = match_info
-
         for pred in pending_preds:
-            p_a, p_b = pred.player_a.lower(), pred.player_b.lower()
-            
-            match_info = scores_map.get((p_a, p_b))
-            if match_info:
-                pred.match_completed = True
-                pred.winner = match_info['winner']
-                pred.score = match_info['score']
-                updated_count += 1
-                
+            for m in completed_matches:
+                pair_match = (
+                    (_names_match(pred.player_a, m['p1']) and _names_match(pred.player_b, m['p2'])) or
+                    (_names_match(pred.player_a, m['p2']) and _names_match(pred.player_b, m['p1']))
+                )
+                if pair_match:
+                    pred.match_completed = True
+                    pred.winner = m['winner']
+                    pred.score = m['score']
+                    updated_count += 1
+                    break
+
         db.commit()
         return {"status": "Success", "updated_matches": updated_count}
     except Exception as e:
@@ -413,22 +444,35 @@ def get_predictions(
     db = SessionLocal()
     try:
         query = db.query(Prediction).filter(Prediction.value_bet_on_player.isnot(None))
-        
-        # Apply optional filters
+
         if match_date:
             query = query.filter(Prediction.match_date == match_date)
         if tournament:
             query = query.filter(Prediction.tournament == tournament)
         if match_completed is not None:
             query = query.filter(Prediction.match_completed == match_completed)
-            
+
         total_matches = query.count()
-        
-        predictions = query.offset(offset).limit(limit).all()
-        
+
+        # Compute hit-rate across ALL matching completed records (not just the current page)
+        all_completed = query.filter(
+            Prediction.match_completed == True,
+            Prediction.winner.isnot(None)
+        ).all()
+
         total_value_bets = 0
         successful_value_bets = 0
-        
+        for p in all_completed:
+            total_value_bets += 1
+            if p.value_bet_on_player and p.value_bet_on_player.lower() == p.winner.lower():
+                successful_value_bets += 1
+
+        prediction_rate = 0.0
+        if total_value_bets > 0:
+            prediction_rate = round((successful_value_bets / total_value_bets) * 100, 2)
+
+        predictions = query.offset(offset).limit(limit).all()
+
         results = []
         for p in predictions:
             results.append({
@@ -446,17 +490,7 @@ def get_predictions(
                 "winner": p.winner,
                 "score": p.score
             })
-            
-            # Calculate hit rate only on matches that are completed, had a value bet, and have a confirmed winner
-            if p.match_completed and p.value_bet_on_player and p.winner:
-                total_value_bets += 1
-                if p.value_bet_on_player.lower() == p.winner.lower():
-                    successful_value_bets += 1
-                    
-        prediction_rate = 0.0
-        if total_value_bets > 0:
-            prediction_rate = round((successful_value_bets / total_value_bets) * 100, 2)
-            
+
         return {
             "pagination": {
                 "total_matches": total_matches,
@@ -474,3 +508,35 @@ def get_predictions(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
+
+@app.get("/download-file")
+def download_file(filename: str):
+    """Download a single file from the model volume.
+
+    Example: GET /download-file?filename=tennis_model.joblib
+    """
+    safe_dir = os.path.realpath(MODEL_DIR)
+    target = os.path.realpath(os.path.join(MODEL_DIR, filename))
+    if not target.startswith(safe_dir + os.sep) and target != safe_dir:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    if not os.path.isfile(target):
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found in volume.")
+    return FileResponse(path=target, filename=filename, media_type="application/octet-stream")
+
+
+@app.get("/download-volume")
+def download_volume():
+    """Download all files in the model volume as a single zip archive."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(MODEL_DIR):
+            fpath = os.path.join(MODEL_DIR, fname)
+            if os.path.isfile(fpath):
+                zf.write(fpath, arcname=fname)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=volume_files.zip"},
+    )
