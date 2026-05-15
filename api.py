@@ -312,11 +312,10 @@ def run_daily_predictions():
 
 @app.post("/update-results")
 def update_results():
-    # Fetch ESPN scores outside the DB transaction so HTTPException propagates cleanly
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=7)
-    date_str = f"{start_date.strftime('%Y%m%d')}-{end_date.strftime('%Y%m%d')}"
-    scores_url = f"https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?dates={date_str}&limit=300"
+    # Fetch ESPN scores outside the DB transaction so HTTPException propagates cleanly.
+    # The date-range parameter causes ESPN to return 0 events for tennis — omit it to get
+    # the current active tournament including all completed matches.
+    scores_url = "https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard?limit=300"
 
     resp = requests.get(scores_url)
     if resp.status_code != 200:
