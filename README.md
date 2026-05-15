@@ -78,6 +78,29 @@ Data fetching is optimised: historical years are loaded from local cache, only t
 
 ---
 
+### GET `/retrain-status`
+Returns the status of the most recent retrain task. Useful since `/retrain` is fire-and-forget.
+```bash
+curl http://localhost:8000/retrain-status
+```
+
+**Response (running):**
+```json
+{ "status": "running", "started_at": "2026-05-15T10:00:00", "years_back": 5 }
+```
+
+**Response (completed):**
+```json
+{ "status": "success", "completed_at": "2026-05-15T10:04:32", "years_back": 5, "meta": "..." }
+```
+
+**Response (failed):**
+```json
+{ "status": "failed", "failed_at": "2026-05-15T10:01:11", "error": "..." }
+```
+
+---
+
 ### GET `/data-status`
 Reports training data freshness, player count, and model artifact sizes. Useful for checking when a retrain is needed.
 ```bash
