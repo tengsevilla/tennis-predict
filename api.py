@@ -66,6 +66,22 @@ class Prediction(Base):
     winner = Column(String(255), nullable=True)
     score = Column(String(255), nullable=True)
 
+
+class EspnMatch(Base):
+    __tablename__ = "espn_matches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    espn_id = Column(String(100), unique=True, index=True)
+    match_date = Column(String(255), index=True)
+    tournament_id = Column(String(255))
+    player_1 = Column(String(255))
+    player_2 = Column(String(255))
+    winner = Column(String(255), nullable=True)
+    score = Column(String(255), nullable=True)
+    p1_sets_won = Column(Integer, nullable=True)
+    p2_sets_won = Column(Integer, nullable=True)
+
+
 Base.metadata.create_all(bind=engine)
 
 # --- FASTAPI APP ---
@@ -177,6 +193,20 @@ def _names_match(db_name: str, espn_name: str) -> bool:
     # All words in the shorter name must appear in the longer name
     shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
     return all(word in longer for word in shorter.split())
+
+
+def _dates_close(db_date_str: str, espn_date_str: str, tolerance_days: int = 4) -> bool:
+    """Return True if the two ISO date strings are within tolerance_days of each other.
+
+    Prevents the same player pair from a later tournament overwriting an older
+    pending prediction that was never resolved.
+    """
+    try:
+        db_dt = pd.to_datetime(db_date_str, utc=True)
+        espn_dt = pd.to_datetime(espn_date_str, utc=True)
+        return abs((db_dt - espn_dt).total_seconds()) <= tolerance_days * 86400
+    except Exception:
+        return True  # If either date is unparseable, allow the match through
 
 
 # --- ENDPOINTS ---
@@ -360,25 +390,60 @@ def update_results():
                 ]
                 score_str = f"{p1_name} {', '.join(sets)} {p2_name}"
 
+            c1_sets_won = sum(
+                1 for i in range(len(c1_lines))
+                if c1_lines[i].get('value', 0) > c2_lines[i].get('value', 0)
+            ) if c1_lines and c2_lines and len(c1_lines) == len(c2_lines) else None
+            c2_sets_won = sum(
+                1 for i in range(len(c2_lines))
+                if c2_lines[i].get('value', 0) > c1_lines[i].get('value', 0)
+            ) if c1_lines and c2_lines and len(c1_lines) == len(c2_lines) else None
+
             completed_matches.append({
+                'espn_id': str(competition.get('id', '')),
+                'tournament_id': str(competition.get('tournamentId', '')),
                 'p1': p1_name,
                 'p2': p2_name,
                 'winner': winner_name,
                 'score': score_str,
+                'date': competition.get('date', ''),
+                'p1_sets_won': c1_sets_won,
+                'p2_sets_won': c2_sets_won,
             })
 
     db = SessionLocal()
     updated_count = 0
+    espn_inserted = 0
     try:
-        pending_preds = db.query(Prediction).filter(Prediction.match_completed == False).all()
-        if not pending_preds:
-            return {"status": "No pending matches to update.", "updated": 0}
+        # Upsert ESPN matches into espn_matches table (dedup by espn_id)
+        existing_ids = {
+            row[0] for row in db.query(EspnMatch.espn_id).all()
+        }
+        for m in completed_matches:
+            if m['espn_id'] and m['espn_id'] not in existing_ids:
+                db.add(EspnMatch(
+                    espn_id=m['espn_id'],
+                    match_date=m['date'],
+                    tournament_id=m['tournament_id'],
+                    player_1=m['p1'],
+                    player_2=m['p2'],
+                    winner=m['winner'],
+                    score=m['score'],
+                    p1_sets_won=m['p1_sets_won'],
+                    p2_sets_won=m['p2_sets_won'],
+                ))
+                existing_ids.add(m['espn_id'])
+                espn_inserted += 1
 
+        # Update pending predictions
+        pending_preds = db.query(Prediction).filter(Prediction.match_completed == False).all()
         for pred in pending_preds:
             for m in completed_matches:
                 pair_match = (
-                    (_names_match(pred.player_a, m['p1']) and _names_match(pred.player_b, m['p2'])) or
-                    (_names_match(pred.player_a, m['p2']) and _names_match(pred.player_b, m['p1']))
+                    (
+                        (_names_match(pred.player_a, m['p1']) and _names_match(pred.player_b, m['p2'])) or
+                        (_names_match(pred.player_a, m['p2']) and _names_match(pred.player_b, m['p1']))
+                    ) and _dates_close(pred.match_date, m['date'])
                 )
                 if pair_match:
                     pred.match_completed = True
@@ -388,7 +453,11 @@ def update_results():
                     break
 
         db.commit()
-        return {"status": "Success", "updated_matches": updated_count}
+        return {
+            "status": "Success",
+            "updated_matches": updated_count,
+            "espn_matches_stored": espn_inserted,
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -396,23 +465,61 @@ def update_results():
         db.close()
 
 @app.post("/retrain")
-def retrain_model(background_tasks: BackgroundTasks):
+def retrain_model(background_tasks: BackgroundTasks, years_back: int = 5):
 
     def retrain_task():
-        # Trigger full retraining
         try:
-            import data_fetcher
-            data_fetcher.fetch_and_process_data()
-
             import train_model
-            train_model.preprocess_and_train()
-
-            print("Retraining complete. Models saved to persistent volume.")
+            meta = train_model.preprocess_and_train(years_back=years_back)
+            print(f"Retraining complete. Data freshness: {meta}")
         except Exception as e:
             print(f"Retraining task failed: {e}")
 
     background_tasks.add_task(retrain_task)
-    return {"status": "Retraining task initiated in the background."}
+    return {"status": "Retraining task initiated in the background.", "years_back": years_back}
+
+
+@app.get("/data-status")
+def data_status():
+    """Report training data freshness and model artifact state."""
+    result = {}
+
+    # Player stats freshness
+    stats_path = os.path.join(MODEL_DIR, "latest_player_stats.joblib")
+    if os.path.exists(stats_path):
+        import joblib as _jl
+        stats = _jl.load(stats_path)
+        result["player_count"] = len(stats)
+        result["stats_file_age_days"] = round(
+            (datetime.now() - datetime.fromtimestamp(os.path.getmtime(stats_path))).total_seconds() / 86400, 1
+        )
+    else:
+        result["player_stats"] = "not found"
+
+    # Training data freshness from cleaned CSV
+    csv_path = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
+    if os.path.exists(csv_path):
+        df_head = pd.read_csv(csv_path, usecols=['tourney_date'])
+        dates = pd.to_datetime(df_head['tourney_date'], format='%Y%m%d', errors='coerce')
+        most_recent = dates.max()
+        result["most_recent_training_match"] = most_recent.strftime('%Y-%m-%d') if pd.notna(most_recent) else "unknown"
+        result["training_data_age_days"] = int((datetime.now() - most_recent).days) if pd.notna(most_recent) else None
+        result["training_rows"] = len(df_head)
+    else:
+        result["training_data"] = "not found — run /retrain"
+
+    # Model artifact sizes
+    artifacts = ["tennis_model.joblib", "scaler.joblib", "label_encoders.joblib",
+                 "latest_player_stats.joblib", "latest_h2h.joblib"]
+    result["artifacts"] = {}
+    for name in artifacts:
+        path = os.path.join(MODEL_DIR, name)
+        if os.path.exists(path):
+            result["artifacts"][name] = f"{round(os.path.getsize(path) / (1024*1024), 2)} MB"
+        else:
+            result["artifacts"][name] = "missing"
+
+    return result
 
 @app.get("/verify-volume")
 def verify_volume():

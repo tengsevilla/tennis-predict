@@ -65,9 +65,10 @@ def calculate_elo(df, k_factor=32, base_rating=1500):
     winner_elos = []
     loser_elos = []
 
-    for idx, row in df.iterrows():
-        w_id = row['winner_id']
-        l_id = row['loser_id']
+    # itertuples is significantly faster than iterrows (no per-row Series overhead)
+    for row in df.itertuples(index=False):
+        w_id = row.winner_id
+        l_id = row.loser_id
 
         w_elo = elo_dict.get(w_id, base_rating)
         l_elo = elo_dict.get(l_id, base_rating)
@@ -75,11 +76,9 @@ def calculate_elo(df, k_factor=32, base_rating=1500):
         winner_elos.append(w_elo)
         loser_elos.append(l_elo)
 
-        # Calculate Expected Win Probability
         expected_w = 1 / (1 + 10 ** ((l_elo - w_elo) / 400))
         expected_l = 1 / (1 + 10 ** ((w_elo - l_elo) / 400))
 
-        # Update Elo Ratings
         elo_dict[w_id] = w_elo + k_factor * (1 - expected_w)
         elo_dict[l_id] = l_elo + k_factor * (0 - expected_l)
 
@@ -101,17 +100,10 @@ def load_and_engineer_data(filepath=None):
     # Calculate chronological Elo before slicing dataframe
     df, final_elos = calculate_elo(df)
 
-    # Also calculate sets won for rolling stats
-    w_sets_dropped = []
-    l_sets_dropped = []
-
-    for idx, row in df.iterrows():
-        w_sets, l_sets = count_sets_won(row['score'])
-        w_sets_dropped.append(l_sets)
-        l_sets_dropped.append(w_sets)
-
-    df['winner_sets_dropped'] = w_sets_dropped
-    df['loser_sets_dropped'] = l_sets_dropped
+    # Also calculate sets won for rolling stats — vectorized via apply
+    sets_result = df['score'].apply(count_sets_won)
+    df['winner_sets_dropped'] = sets_result.apply(lambda x: x[1])
+    df['loser_sets_dropped'] = sets_result.apply(lambda x: x[0])
 
     # Melt dataframe to player level to calculate rolling stats safely
     winner_cols = ['tourney_date', 'winner_id', 'surface', 'winner_sets_dropped', 'w_1stWon', 'w_2ndWon', 'w_svpt', 'l_svpt', 'l_1stWon', 'l_2ndWon']
@@ -260,133 +252,77 @@ def load_and_engineer_data(filepath=None):
     return df
 
 def balance_dataset(df):
-
-    rows = []
-
-    # Fill NA ages
+    df = df.copy()
     df['winner_age'] = df['winner_age'].fillna(df['winner_age'].median())
     df['loser_age'] = df['loser_age'].fillna(df['loser_age'].median())
-
-    # Fill NA hands
     df['winner_hand'] = df['winner_hand'].fillna('R')
     df['loser_hand'] = df['loser_hand'].fillna('R')
 
-    for idx, row in df.iterrows():
-        surface = row['surface']
-        date = row['tourney_date']
-        level = row['tourney_level']
+    # Pre-compute H2H perspective for winner and loser (vectorized)
+    w_is_p1 = df['winner_id'] == df['p1']
+    df['w_h2h'] = np.where(w_is_p1, df['h2h_p1_win_pct'], 1 - df['h2h_p1_win_pct'])
+    df['l_h2h'] = np.where(~w_is_p1, df['h2h_p1_win_pct'], 1 - df['h2h_p1_win_pct'])
 
-        # Winner stats
-        w_id = row['winner_id']
-        w_name = row['winner_name']
-        w_rank = row['winner_rank']
-        w_points = row['winner_rank_points']
-        w_elo = row['winner_elo']
-        w_age = row['winner_age']
-        w_hand = row['winner_hand']
-        w_recent_win_pct = row['winner_recent_win_pct']
-        w_serve_win_pct = row['winner_serve_win_pct']
-        w_return_win_pct = row['winner_return_win_pct']
-        w_sets_dropped_avg = row['winner_sets_dropped_avg']
-        w_surface_win_pct = row['winner_surface_win_pct']
+    shared = dict(surface=df['surface'], tourney_level=df['tourney_level'], date=df['tourney_date'])
 
-        # Loser stats
-        l_id = row['loser_id']
-        l_name = row['loser_name']
-        l_rank = row['loser_rank']
-        l_points = row['loser_rank_points']
-        l_elo = row['loser_elo']
-        l_age = row['loser_age']
-        l_hand = row['loser_hand']
-        l_recent_win_pct = row['loser_recent_win_pct']
-        l_serve_win_pct = row['loser_serve_win_pct']
-        l_return_win_pct = row['loser_return_win_pct']
-        l_sets_dropped_avg = row['loser_sets_dropped_avg']
-        l_surface_win_pct = row['loser_surface_win_pct']
+    # Row set 1: winner is player_a (target=1)
+    winner_as_a = pd.DataFrame({
+        **shared,
+        'player_a_name': df['winner_name'], 'player_b_name': df['loser_name'],
+        'player_a_rank': df['winner_rank'], 'player_a_age': df['winner_age'],
+        'player_a_hand': df['winner_hand'], 'player_a_elo': df['winner_elo'],
+        'player_a_recent_win_pct': df['winner_recent_win_pct'],
+        'player_a_serve_win_pct': df['winner_serve_win_pct'],
+        'player_a_return_win_pct': df['winner_return_win_pct'],
+        'player_a_sets_dropped_avg': df['winner_sets_dropped_avg'],
+        'player_a_surface_win_pct': df['winner_surface_win_pct'],
+        'point_difference': df['winner_rank_points'] - df['loser_rank_points'],
+        'elo_difference': df['winner_elo'] - df['loser_elo'],
+        'h2h_win_pct': df['w_h2h'],
+        'player_b_rank': df['loser_rank'], 'player_b_age': df['loser_age'],
+        'player_b_hand': df['loser_hand'], 'player_b_elo': df['loser_elo'],
+        'player_b_recent_win_pct': df['loser_recent_win_pct'],
+        'player_b_serve_win_pct': df['loser_serve_win_pct'],
+        'player_b_return_win_pct': df['loser_return_win_pct'],
+        'player_b_sets_dropped_avg': df['loser_sets_dropped_avg'],
+        'player_b_surface_win_pct': df['loser_surface_win_pct'],
+        'target': 1,
+    })
 
-        h2h = row['h2h_p1_win_pct']
-        p1 = row['p1']
+    # Row set 2: loser is player_a (target=0)
+    loser_as_a = pd.DataFrame({
+        **shared,
+        'player_a_name': df['loser_name'], 'player_b_name': df['winner_name'],
+        'player_a_rank': df['loser_rank'], 'player_a_age': df['loser_age'],
+        'player_a_hand': df['loser_hand'], 'player_a_elo': df['loser_elo'],
+        'player_a_recent_win_pct': df['loser_recent_win_pct'],
+        'player_a_serve_win_pct': df['loser_serve_win_pct'],
+        'player_a_return_win_pct': df['loser_return_win_pct'],
+        'player_a_sets_dropped_avg': df['loser_sets_dropped_avg'],
+        'player_a_surface_win_pct': df['loser_surface_win_pct'],
+        'point_difference': df['loser_rank_points'] - df['winner_rank_points'],
+        'elo_difference': df['loser_elo'] - df['winner_elo'],
+        'h2h_win_pct': df['l_h2h'],
+        'player_b_rank': df['winner_rank'], 'player_b_age': df['winner_age'],
+        'player_b_hand': df['winner_hand'], 'player_b_elo': df['winner_elo'],
+        'player_b_recent_win_pct': df['winner_recent_win_pct'],
+        'player_b_serve_win_pct': df['winner_serve_win_pct'],
+        'player_b_return_win_pct': df['winner_return_win_pct'],
+        'player_b_sets_dropped_avg': df['winner_sets_dropped_avg'],
+        'player_b_surface_win_pct': df['winner_surface_win_pct'],
+        'target': 0,
+    })
 
-        w_h2h = h2h if w_id == p1 else (1 - h2h)
-        l_h2h = h2h if l_id == p1 else (1 - h2h)
-
-        # Row 1: Player A is Winner
-        rows.append({
-            'date': date,
-            'player_a_name': w_name,
-            'player_b_name': l_name,
-            'surface': surface,
-            'tourney_level': level,
-
-            'player_a_rank': w_rank,
-            'player_a_age': w_age,
-            'player_a_hand': w_hand,
-            'player_a_elo': w_elo,
-            'player_a_recent_win_pct': w_recent_win_pct,
-            'player_a_serve_win_pct': w_serve_win_pct,
-            'player_a_return_win_pct': w_return_win_pct,
-            'player_a_sets_dropped_avg': w_sets_dropped_avg,
-            'player_a_surface_win_pct': w_surface_win_pct,
-            'point_difference': w_points - l_points,
-            'elo_difference': w_elo - l_elo,
-            'h2h_win_pct': w_h2h,
-
-            'player_b_rank': l_rank,
-            'player_b_age': l_age,
-            'player_b_hand': l_hand,
-            'player_b_elo': l_elo,
-            'player_b_recent_win_pct': l_recent_win_pct,
-            'player_b_serve_win_pct': l_serve_win_pct,
-            'player_b_return_win_pct': l_return_win_pct,
-            'player_b_sets_dropped_avg': l_sets_dropped_avg,
-            'player_b_surface_win_pct': l_surface_win_pct,
-
-            'target': 1
-        })
-
-        # Row 2: Player A is Loser
-        rows.append({
-            'date': date,
-            'player_a_name': l_name,
-            'player_b_name': w_name,
-            'surface': surface,
-            'tourney_level': level,
-
-            'player_a_rank': l_rank,
-            'player_a_age': l_age,
-            'player_a_hand': l_hand,
-            'player_a_elo': l_elo,
-            'player_a_recent_win_pct': l_recent_win_pct,
-            'player_a_serve_win_pct': l_serve_win_pct,
-            'player_a_return_win_pct': l_return_win_pct,
-            'player_a_sets_dropped_avg': l_sets_dropped_avg,
-            'player_a_surface_win_pct': l_surface_win_pct,
-            'point_difference': l_points - w_points,
-            'elo_difference': l_elo - w_elo,
-            'h2h_win_pct': l_h2h,
-
-            'player_b_rank': w_rank,
-            'player_b_age': w_age,
-            'player_b_hand': w_hand,
-            'player_b_elo': w_elo,
-            'player_b_recent_win_pct': w_recent_win_pct,
-            'player_b_serve_win_pct': w_serve_win_pct,
-            'player_b_return_win_pct': w_return_win_pct,
-            'player_b_sets_dropped_avg': w_sets_dropped_avg,
-            'player_b_surface_win_pct': w_surface_win_pct,
-
-            'target': 0
-        })
-
-    balanced_df = pd.DataFrame(rows)
-    # Sort again just to be safe
-    balanced_df = balanced_df.sort_values('date').reset_index(drop=True)
+    balanced_df = pd.concat([winner_as_a, loser_as_a]).sort_values('date').reset_index(drop=True)
     return balanced_df
 
-def preprocess_and_train():
+def preprocess_and_train(years_back=5):
     global model, scaler, label_encoders
 
     print("Loading and engineering data...")
+    import data_fetcher
+    _, fetch_meta = data_fetcher.fetch_and_process_data(years_back=years_back)
+
     df = load_and_engineer_data()
     print("Balancing dataset...")
     balanced_df = balance_dataset(df)
@@ -470,6 +406,7 @@ def preprocess_and_train():
     joblib.dump(latest_player_stats, os.path.join(MODEL_DIR, "latest_player_stats.joblib"))
     joblib.dump(latest_h2h, os.path.join(MODEL_DIR, "latest_h2h.joblib"))
     print(f"Saved all artifacts to {MODEL_DIR}")
+    return fetch_meta
 
 def predict_match(player_a_name, player_b_name, surface, tourney_level='G'):
     global model, scaler, label_encoders, latest_player_stats, latest_h2h
