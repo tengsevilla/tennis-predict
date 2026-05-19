@@ -460,9 +460,13 @@ def update_results():
     updated_count = 0
     espn_inserted = 0
     try:
-        # Upsert ESPN matches into espn_matches table (dedup by espn_id)
+        # Upsert ESPN matches into espn_matches table (dedup by espn_id).
+        # Query only the IDs in this batch rather than the full table.
+        incoming_ids = {m['espn_id'] for m in completed_matches if m['espn_id']}
         existing_ids = {
-            row[0] for row in db.query(EspnMatch.espn_id).all()
+            row[0] for row in db.query(EspnMatch.espn_id).filter(
+                EspnMatch.espn_id.in_(incoming_ids)
+            ).all()
         }
         for m in completed_matches:
             if m['espn_id'] and m['espn_id'] not in existing_ids:
