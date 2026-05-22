@@ -263,6 +263,22 @@ def _calc_profit(pred, stake: float = 100.0):
     return round(stake * (bet_odds - 1), 2) if won else -stake
 
 
+def _derive_character_state(hit_rate: float, roi: float, retrain_status: str) -> str:
+    if retrain_status == "failed":
+        return "PANICKING"
+    if retrain_status == "running":
+        return "ANALYZING"
+    if retrain_status == "success":
+        return "TRIUMPHANT"
+    if roi > 5 and hit_rate > 65:
+        return "CELEBRATING"
+    if roi > 0 and hit_rate >= 55:
+        return "CONFIDENT"
+    if roi < 0 or hit_rate < 45:
+        return "STRUGGLING"
+    return "IDLE"
+
+
 # --- ENDPOINTS ---
 
 @app.post("/run-daily-predictions")
@@ -563,6 +579,59 @@ def get_retrain_status():
             return json.load(f)
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+@app.get("/character-state")
+def character_state():
+    # Retrain status
+    retrain_status = "idle"
+    if os.path.exists(RETRAIN_STATUS_FILE):
+        try:
+            with open(RETRAIN_STATUS_FILE, 'r') as f:
+                retrain_status = json.load(f).get("status", "idle")
+        except Exception:
+            pass
+
+    # Hit rate & ROI from completed value bets
+    db = SessionLocal()
+    try:
+        completed = db.query(Prediction).filter(
+            Prediction.match_completed == True,
+            Prediction.winner.isnot(None),
+            Prediction.value_bet_on_player.isnot(None),
+        ).all()
+    finally:
+        db.close()
+
+    total_value_bets = len(completed)
+    successful_value_bets = 0
+    total_profit_units = 0.0
+    for p in completed:
+        if p.value_bet_on_player and p.value_bet_on_player.lower() == p.winner.lower():
+            successful_value_bets += 1
+        profit = _calc_profit(p)
+        if profit is not None:
+            total_profit_units += profit
+
+    hit_rate = 0.0
+    roi_percent = 0.0
+    if total_value_bets > 0:
+        hit_rate = round((successful_value_bets / total_value_bets) * 100, 2)
+        roi_percent = round((total_profit_units / (total_value_bets * 100)) * 100, 2)
+
+    state = _derive_character_state(hit_rate, roi_percent, retrain_status)
+
+    return {
+        "state": state,
+        "metrics": {
+            "hit_rate_percent": hit_rate,
+            "roi_percent": roi_percent,
+            "retrain_status": retrain_status,
+            "total_value_bets": total_value_bets,
+            "successful_value_bets": successful_value_bets,
+            "total_profit_units": round(total_profit_units, 2),
+        },
+    }
 
 
 @app.get("/data-status")
