@@ -249,6 +249,20 @@ def _dates_close(db_date_str: str, espn_date_str: str, tolerance_days: int = 4) 
         return True  # If either date is unparseable, allow the match through
 
 
+def _calc_profit(pred, stake: float = 100.0):
+    if not pred.match_completed or pred.winner is None or pred.value_bet_on_player is None:
+        return None
+    bet_odds = (
+        pred.player_a_odds
+        if pred.value_bet_on_player.lower() == pred.player_a.lower()
+        else pred.player_b_odds
+    )
+    if not bet_odds:
+        return None
+    won = pred.value_bet_on_player.lower() == pred.winner.lower()
+    return round(stake * (bet_odds - 1), 2) if won else -stake
+
+
 # --- ENDPOINTS ---
 
 @app.post("/run-daily-predictions")
@@ -647,14 +661,20 @@ def get_predictions(
 
         total_value_bets = 0
         successful_value_bets = 0
+        total_profit_units = 0.0
         for p in all_completed:
             total_value_bets += 1
             if p.value_bet_on_player and p.value_bet_on_player.lower() == p.winner.lower():
                 successful_value_bets += 1
+            profit = _calc_profit(p)
+            if profit is not None:
+                total_profit_units += profit
 
         prediction_rate = 0.0
+        roi_percent = 0.0
         if total_value_bets > 0:
             prediction_rate = round((successful_value_bets / total_value_bets) * 100, 2)
+            roi_percent = round((total_profit_units / (total_value_bets * 100)) * 100, 2)
 
         predictions = query.offset(offset).limit(limit).all()
 
@@ -673,7 +693,8 @@ def get_predictions(
                 "value_bet_on_player": p.value_bet_on_player,
                 "match_completed": p.match_completed,
                 "winner": p.winner,
-                "score": p.score
+                "score": p.score,
+                "profit_units": _calc_profit(p)
             })
 
         return {
@@ -686,7 +707,9 @@ def get_predictions(
             "stats": {
                 "total_value_bets_evaluated": total_value_bets,
                 "successful_value_bets": successful_value_bets,
-                "prediction_rate_percent": prediction_rate
+                "prediction_rate_percent": prediction_rate,
+                "total_profit_units": round(total_profit_units, 2),
+                "roi_percent": roi_percent
             }
         }
     except Exception as e:
