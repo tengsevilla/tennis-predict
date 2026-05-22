@@ -619,6 +619,22 @@ def character_state():
         hit_rate = round((successful_value_bets / total_value_bets) * 100, 2)
         roi_percent = round((total_profit_units / (total_value_bets * 100)) * 100, 2)
 
+    # Training data age
+    training_data_age_days = None
+    most_recent_training_match = None
+    csv_path = os.path.join(MODEL_DIR, "cleaned_atp_data.csv")
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, 'rb') as f:
+                row_count = sum(1 for _ in f) - 1
+            df_last = pd.read_csv(csv_path, usecols=['tourney_date'], skiprows=range(1, row_count))
+            most_recent = pd.to_datetime(df_last['tourney_date'].iloc[0], format='%Y%m%d', errors='coerce')
+            if pd.notna(most_recent):
+                training_data_age_days = int((datetime.now() - most_recent).days)
+                most_recent_training_match = most_recent.strftime('%Y-%m-%d')
+        except Exception:
+            pass
+
     state = _derive_character_state(hit_rate, roi_percent, retrain_status)
 
     return {
@@ -630,6 +646,8 @@ def character_state():
             "total_value_bets": total_value_bets,
             "successful_value_bets": successful_value_bets,
             "total_profit_units": round(total_profit_units, 2),
+            "training_data_age_days": training_data_age_days,
+            "most_recent_training_match": most_recent_training_match,
         },
     }
 
